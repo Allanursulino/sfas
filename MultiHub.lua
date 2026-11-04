@@ -103,6 +103,16 @@ local function merge(base, over)
 	return out
 end
 
+-- Pointer position that also works on phones: a touch InputObject is updated in place while the
+-- finger moves, so reading .Position every frame follows it; the mouse keeps GetMouseLocation.
+local function pointerOf(input)
+	if input and input.UserInputType == Enum.UserInputType.Touch then
+		return Vector2.new(input.Position.X, input.Position.Y)
+	end
+	return UserInputService:GetMouseLocation()
+end
+Library._pointerOf = pointerOf
+
 Library._merge = merge
 Library._copy  = copy
 Library._clamp = clamp
@@ -1250,14 +1260,17 @@ function Library:CreateWindow(opts)
 	-- no sidebar (a tab bar under the topbar instead), stacked columns and 36 px controls.
 	-- opts.Touch = true / false forces it; Library.Touch tells the controls.
 	local vp0 = Camera and Camera.ViewportSize or Vector2.new(1920, 1080)
-	local touch = opts.Touch
-	if touch == nil then touch = Library:IsMobile() or vp0.X < 900 end
-	touch = touch == true
+	-- MOBILE FIX: the PC layout (sidebar, desktop controls, desktop dropdowns) is used on EVERY
+	-- device. The old phone layout only comes back when a hub passes opts.Touch = true.
+	-- `phone` only decides how the PC window is sized so it fits a small screen.
+	local touch = opts.Touch == true
+	local phone = (not touch) and (Library:IsMobile() or vp0.X < 900)
 	rawset(Library, "Touch", touch)
+	rawset(Library, "Phone", phone)
 	local TOUCH_INSET = 8
 	if touch then
 		Size = UDim2.new(0, math.max(300, vp0.X - TOUCH_INSET * 2), 0, math.max(240, vp0.Y - TOUCH_INSET * 2))
-	elseif type(Library.GetSetting) == "function" then
+	elseif type(Library.GetSetting) == "function" and not phone then
 		-- A5: a size the player dragged earlier wins over the hub default
 		local okWs, ws = pcall(Library.GetSetting, Library, "WindowSize", nil)
 		if okWs and type(ws) == "table" and tonumber(ws.w) and tonumber(ws.h) then
@@ -1343,7 +1356,9 @@ function Library:CreateWindow(opts)
 	-- base (1.43 on desktop: his 1.14 times 1.25) times a user factor the Settings slider shows
 	-- as a percentage (setting UIScaleUser, 70-130 %, default 100 %). The old UIScale setting is
 	-- not read any more.
-	local SCALE_BASE = touch and 1 or 1.43
+	local PHONE_BASE = 0.75   -- PC layout shrunk for a phone screen
+	local MIN_SCALE = phone and 0.4 or 0.6
+	local SCALE_BASE = touch and 1 or (phone and PHONE_BASE or 1.43)
 	local userScale = tonumber(opts.Scale)
 	if not userScale and type(Library.GetSetting) == "function" then
 		local ok, v = pcall(Library.GetSetting, Library, "UIScaleUser", 1)
@@ -1359,9 +1374,14 @@ function Library:CreateWindow(opts)
 		uiScaleValue = math.clamp(tonumber(opts.Scale) or 1, 0.8, 1.6)
 		Size = UDim2.new(0, math.floor((vp0.X - TOUCH_INSET * 2) / uiScaleValue), 0, math.floor((vp0.Y - TOUCH_INSET * 2) / uiScaleValue))
 	else
+		if phone then
+			-- phone: the PC window fills the screen (12 px margin) at a reduced scale
+			uiScaleValue = math.clamp(uiScaleValue, MIN_SCALE, 1.3)
+			Size = UDim2.new(0, math.max(540, math.floor((vp0.X - 24) / uiScaleValue)), 0, math.max(330, math.floor((vp0.Y - 24) / uiScaleValue)))
+		end
 		-- never larger than the viewport (windowed Roblox, small laptops): leave a 24 px margin
 		local fit = math.min((vp0.X - 24) / math.max(1, Size.X.Offset), (vp0.Y - 24) / math.max(1, Size.Y.Offset))
-		if fit > 0 and fit < uiScaleValue then uiScaleValue = math.max(0.6, fit) end
+		if fit > 0 and fit < uiScaleValue then uiScaleValue = math.max(MIN_SCALE, fit) end
 	end
 	Library.UIScale = uiScaleValue
 	local mainPos
@@ -1538,6 +1558,13 @@ function Library:CreateWindow(opts)
 		Size = main.Size
 		if applyTouchRows then applyTouchRows(vp.Y / s < 500) end
 	end
+	-- phone: re-fit the PC window to the screen at scale s (rotation, slider)
+	local function fitPhoneWindow(s)
+		local vp = Camera and Camera.ViewportSize or vp0
+		main.Size = UDim2.fromOffset(math.max(540, math.floor((vp.X - 24) / s)), math.max(330, math.floor((vp.Y - 24) / s)))
+		main.Position = UDim2.fromOffset(12, 12)
+		Size = main.Size
+	end
 	-- the slider hands in the user factor; the applied scale is base x user, capped so the window
 	-- stays inside the viewport (the same 24 px margin as at boot)
 	function Library:SetUIScale(u)
@@ -1546,14 +1573,16 @@ function Library:CreateWindow(opts)
 		local want = SCALE_BASE * u
 		Library._wantedScale = want
 		local s = want
-		if not touch then
+		if phone then
+			s = math.clamp(want, MIN_SCALE, 1.3)
+		elseif not touch then
 			local vp = Camera and Camera.ViewportSize or vp0
 			local fit = math.min((vp.X - 24) / math.max(1, Size.X.Offset), (vp.Y - 24) / math.max(1, Size.Y.Offset))
-			if fit > 0 then s = math.max(0.6, math.min(want, fit)) end
+			if fit > 0 then s = math.max(MIN_SCALE, math.min(want, fit)) end
 		end
 		Library.UIScale = s
 		mainScale.Scale = s
-		if touch then fitTouchWindow(s) end
+		if touch then fitTouchWindow(s) elseif phone then fitPhoneWindow(s) end
 		if type(Library.SetSetting) == "function" then pcall(Library.SetSetting, Library, "UIScaleUser", u) end
 	end
 	-- Re-fit when the Roblox window is resized (fullscreen <-> windowed)
@@ -1562,9 +1591,10 @@ function Library:CreateWindow(opts)
 		Library:GiveSignal(Camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
 			local vp = Camera.ViewportSize
 			if touch then fitTouchWindow(mainScale.Scale > 0 and mainScale.Scale or 1) return end
+			if phone then fitPhoneWindow(mainScale.Scale > 0 and mainScale.Scale or PHONE_BASE) return end
 			local want = Library._wantedScale or uiScaleValue
 			local fit = math.min((vp.X - 24) / math.max(1, Size.X.Offset), (vp.Y - 24) / math.max(1, Size.Y.Offset))
-			local s = math.max(0.6, math.min(want, fit))
+			local s = math.max(MIN_SCALE, math.min(want, fit))
 			if math.abs(mainScale.Scale - s) > 0.01 then
 				mainScale.Scale = s
 				Library.UIScale = s
@@ -3082,7 +3112,7 @@ function Library:CreateWindow(opts)
 		if window.DragMode == "none" then return end
 		-- ScreenGui.IgnoreGuiInset = true: AbsolutePosition and GetMouseLocation share the
 		-- same screen-space origin, so no inset correction anywhere below.
-		local startMouse = UserInputService:GetMouseLocation()
+		local startMouse = pointerOf(input)
 		-- Work in the ScreenGui's own pixel space (ghost and Main are siblings there), so
 		-- the outline sits exactly on the window whatever the topbar inset does.
 		local guiOrigin  = screenGui.AbsolutePosition
@@ -3113,7 +3143,7 @@ function Library:CreateWindow(opts)
 		local moveConn, upConn
 		local lastX, lastY = startPos.X, startPos.Y
 		moveConn = RunService.RenderStepped:Connect(function()
-			local now = UserInputService:GetMouseLocation()
+			local now = pointerOf(input)
 			local nx = clamp(startPos.X + (now.X - startMouse.X), 0, math.max(0, vp.X - winSize.X))
 			local ny = clamp(startPos.Y + (now.Y - startMouse.Y), 0, math.max(0, vp.Y - winSize.Y))
 			if nx == lastX and ny == lastY then return end
@@ -3852,7 +3882,10 @@ function Library:CreateWindow(opts)
 		window:SetVisible(false)
 	end
 	minimizeBtn.MouseButton1Click:Connect(function() window:Minimize() end)
-	closeBtn.MouseButton1Click:Connect(function() Library:HideHub() end)
+	closeBtn.MouseButton1Click:Connect(function()
+		-- phone: no toggle key exists, so X folds the hub into the island (tap it to reopen)
+		if Library:IsMobile() then window:Minimize() else Library:HideHub() end
+	end)
 	do
 		local key = opts.ToggleKeybind
 		if typeof(key) == "EnumItem" then
@@ -4103,7 +4136,7 @@ function Library:CreateWindow(opts)
 			Visible = not touch,   -- the touch window is the screen
 			AutoButtonColor = false,
 			AnchorPoint = Vector2.new(1, 1),
-			Size = UDim2.new(0, 18, 0, 18),
+			Size = phone and UDim2.new(0, 30, 0, 30) or UDim2.new(0, 18, 0, 18),
 			Position = UDim2.new(1, -2, 1, -2),
 			ZIndex = 30,
 			Parent = main,
@@ -4128,7 +4161,7 @@ function Library:CreateWindow(opts)
 			if io.UserInputType == Enum.UserInputType.MouseButton1 or io.UserInputType == Enum.UserInputType.Touch then
 				resizing = true
 				fitHeightOn = false   -- the fit stays out of the drag
-				startMouse = UserInputService:GetMouseLocation()
+				startMouse = pointerOf(io)
 				startSize = Vector2.new(main.AbsoluteSize.X, main.AbsoluteSize.Y)
 			end
 		end)
@@ -4136,7 +4169,7 @@ function Library:CreateWindow(opts)
 			if not resizing then return end
 			if io.UserInputType ~= Enum.UserInputType.MouseMovement and io.UserInputType ~= Enum.UserInputType.Touch then return end
 			local k = mainScale.Scale > 0 and mainScale.Scale or 1
-			local m = UserInputService:GetMouseLocation()
+			local m = pointerOf(io)
 			local vp = Camera and Camera.ViewportSize or Vector2.new(1920, 1080)
 			local w = math.clamp((startSize.X + (m.X - startMouse.X)) / k, 540, (vp.X - 24) / k)
 			local h = math.clamp((startSize.Y + (m.Y - startMouse.Y)) / k, 420, (vp.Y - 24) / k)
@@ -4148,7 +4181,7 @@ function Library:CreateWindow(opts)
 				resizing = false
 				Size = main.Size
 				fitHeightOn = false   -- He picked a size: the fit stays out of the way this session
-				if type(Library.SetSetting) == "function" then
+				if type(Library.SetSetting) == "function" and not phone then
 					pcall(Library.SetSetting, Library, "WindowSize", { w = main.Size.X.Offset, h = main.Size.Y.Offset })
 				end
 				if type(Library.CorvusLog) == "function" then pcall(Library.CorvusLog, Library, string.format("HUB resized %dx%d", main.Size.X.Offset, main.Size.Y.Offset)) end
