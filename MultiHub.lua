@@ -1356,10 +1356,11 @@ function Library:CreateWindow(opts)
 	-- base (1.43 on desktop: his 1.14 times 1.25) times a user factor the Settings slider shows
 	-- as a percentage (setting UIScaleUser, 70-130 %, default 100 %). The old UIScale setting is
 	-- not read any more.
-	-- PHONE: one fixed window design (840 x 520 logical px, the size from the owner's screenshot)
+	-- PHONE: one fixed window design (600 x 372 logical px; same on-screen size as before, but the
+	-- content is ~1.4x larger because fewer logical px share the window)
 	-- and a scale that follows the screen height, so every phone gets the same window with
 	-- readable text (about 15 px) and tabs; the window takes ~82 % of the height.
-	local PHONE_W, PHONE_H = 840, 520
+	local PHONE_W, PHONE_H = 600, 372
 	local MIN_SCALE = phone and 0.4 or 0.6
 	local function phoneScale(vp, user)
 		local base = math.min(0.82 * vp.Y / PHONE_H, (vp.X - 24) / PHONE_W)
@@ -4196,8 +4197,8 @@ function Library:CreateWindow(opts)
 			local k = mainScale.Scale > 0 and mainScale.Scale or 1
 			local m = pointerOf(io)
 			local vp = Camera and Camera.ViewportSize or Vector2.new(1920, 1080)
-			local w = math.clamp((startSize.X + (m.X - startMouse.X)) / k, 540, (vp.X - 24) / k)
-			local h = math.clamp((startSize.Y + (m.Y - startMouse.Y)) / k, 420, (vp.Y - 24) / k)
+			local w = math.clamp((startSize.X + (m.X - startMouse.X)) / k, phone and 420 or 540, (vp.X - 24) / k)
+			local h = math.clamp((startSize.Y + (m.Y - startMouse.Y)) / k, phone and 300 or 420, (vp.Y - 24) / k)
 			main.Size = UDim2.fromOffset(math.floor(w), math.floor(h))
 		end))
 		Library:GiveSignal(UserInputService.InputEnded:Connect(function(io)
