@@ -1356,9 +1356,16 @@ function Library:CreateWindow(opts)
 	-- base (1.43 on desktop: his 1.14 times 1.25) times a user factor the Settings slider shows
 	-- as a percentage (setting UIScaleUser, 70-130 %, default 100 %). The old UIScale setting is
 	-- not read any more.
-	local PHONE_BASE = 0.75   -- PC layout shrunk for a phone screen
+	-- PHONE: one fixed window design (840 x 520 logical px, the size from the owner's screenshot)
+	-- and a scale that follows the screen height, so every phone gets the same window with
+	-- readable text (about 15 px) and tabs; the window takes ~82 % of the height.
+	local PHONE_W, PHONE_H = 840, 520
 	local MIN_SCALE = phone and 0.4 or 0.6
-	local SCALE_BASE = touch and 1 or (phone and PHONE_BASE or 1.43)
+	local function phoneScale(vp, user)
+		local base = math.min(0.82 * vp.Y / PHONE_H, (vp.X - 24) / PHONE_W)
+		return math.clamp(base * (user or 1), MIN_SCALE, 3)
+	end
+	local SCALE_BASE = touch and 1 or (phone and phoneScale(vp0, 1) or 1.43)
 	local userScale = tonumber(opts.Scale)
 	if not userScale and type(Library.GetSetting) == "function" then
 		local ok, v = pcall(Library.GetSetting, Library, "UIScaleUser", 1)
@@ -1376,8 +1383,8 @@ function Library:CreateWindow(opts)
 	else
 		if phone then
 			-- phone: the PC window fills the screen (12 px margin) at a reduced scale
-			uiScaleValue = math.clamp(uiScaleValue, MIN_SCALE, 1.3)
-			Size = UDim2.new(0, math.max(540, math.floor((vp0.X - 24) / uiScaleValue)), 0, math.max(330, math.floor((vp0.Y - 24) / uiScaleValue)))
+			uiScaleValue = phoneScale(vp0, userScale)
+			Size = UDim2.new(0, PHONE_W, 0, PHONE_H)
 		end
 		-- never larger than the viewport (windowed Roblox, small laptops): leave a 24 px margin
 		local fit = math.min((vp0.X - 24) / math.max(1, Size.X.Offset), (vp0.Y - 24) / math.max(1, Size.Y.Offset))
@@ -1560,9 +1567,12 @@ function Library:CreateWindow(opts)
 	end
 	-- phone: re-fit the PC window to the screen at scale s (rotation, slider)
 	local function fitPhoneWindow(s)
+		-- keep the window design size (or the size he dragged it to), never larger than the screen
 		local vp = Camera and Camera.ViewportSize or vp0
-		main.Size = UDim2.fromOffset(math.max(540, math.floor((vp.X - 24) / s)), math.max(330, math.floor((vp.Y - 24) / s)))
-		main.Position = UDim2.fromOffset(12, 12)
+		local w = math.min(main.Size.X.Offset, math.floor((vp.X - 24) / s))
+		local h = math.min(main.Size.Y.Offset, math.floor((vp.Y - 24) / s))
+		main.Size = UDim2.fromOffset(w, h)
+		main.Position = UDim2.new(0.5, -w * s / 2, 0.5, -h * s / 2)
 		Size = main.Size
 	end
 	-- the slider hands in the user factor; the applied scale is base x user, capped so the window
@@ -1574,7 +1584,7 @@ function Library:CreateWindow(opts)
 		Library._wantedScale = want
 		local s = want
 		if phone then
-			s = math.clamp(want, MIN_SCALE, 1.3)
+			s = phoneScale(Camera and Camera.ViewportSize or vp0, u)
 		elseif not touch then
 			local vp = Camera and Camera.ViewportSize or vp0
 			local fit = math.min((vp.X - 24) / math.max(1, Size.X.Offset), (vp.Y - 24) / math.max(1, Size.Y.Offset))
@@ -1585,13 +1595,28 @@ function Library:CreateWindow(opts)
 		if touch then fitTouchWindow(s) elseif phone then fitPhoneWindow(s) end
 		if type(Library.SetSetting) == "function" then pcall(Library.SetSetting, Library, "UIScaleUser", u) end
 	end
+	if phone then
+		task.delay(0.6, function()
+			if Library.Unloaded then return end
+			local s = phoneScale(Camera and Camera.ViewportSize or vp0, rawget(Library, "UIScaleUser") or 1)
+			mainScale.Scale = s
+			Library.UIScale = s
+			fitPhoneWindow(s)
+		end)
+	end
 	-- Re-fit when the Roblox window is resized (fullscreen <-> windowed)
 	rawset(Library, "_wantedScale", rawget(Library, "_wantedScale") or uiScaleValue)
 	if Camera then
 		Library:GiveSignal(Camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
 			local vp = Camera.ViewportSize
 			if touch then fitTouchWindow(mainScale.Scale > 0 and mainScale.Scale or 1) return end
-			if phone then fitPhoneWindow(mainScale.Scale > 0 and mainScale.Scale or PHONE_BASE) return end
+			if phone then
+				local s = phoneScale(vp, rawget(Library, "UIScaleUser") or 1)
+				mainScale.Scale = s
+				Library.UIScale = s
+				fitPhoneWindow(s)
+				return
+			end
 			local want = Library._wantedScale or uiScaleValue
 			local fit = math.min((vp.X - 24) / math.max(1, Size.X.Offset), (vp.Y - 24) / math.max(1, Size.Y.Offset))
 			local s = math.max(MIN_SCALE, math.min(want, fit))
