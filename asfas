@@ -1,0 +1,1954 @@
+--!nocheck
+--[[
+    ================================================================================
+    STEAL A SUPERPOWER! - MULTIHUB PC & MOBILE SCRIPT (v1.0)
+    ================================================================================
+    Game:       Steal a Superpower! (by 11 R$ Productions)
+    PlaceId:    74183246285569 | UniverseId: 10770228857
+    Platform:   PC & Mobile (Auto-Detected Touch + Native MultiHub Button + Keybind)
+    Icon ID:    rbxassetid://117030396934566
+    Worlds:     World 1 (10 Zones) & World 2 (11 Zones) Full Support
+    ================================================================================
+]]
+
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+-- Prevent duplicate execution
+local GLOBAL_ENV = (getgenv and getgenv()) or _G
+if GLOBAL_ENV.__SAS_MULTIHUB_CLEANUP then
+    pcall(GLOBAL_ENV.__SAS_MULTIHUB_CLEANUP)
+end
+
+-- ============================================================================
+-- 1. SERVICES & ENVIRONMENT COMPATIBILITY
+-- ============================================================================
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local TweenService      = game:GetService("TweenService")
+local VirtualUser       = game:GetService("VirtualUser")
+local TeleportService   = game:GetService("TeleportService")
+local HttpService       = game:GetService("HttpService")
+local CoreGui           = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+while not LocalPlayer do
+    Players.PlayerAdded:Wait()
+    LocalPlayer = Players.LocalPlayer
+end
+
+local IS_MOBILE = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+-- Executor function polyfills (Safe for Luau Type Checker & Obfuscators)
+local debug_tbl              = type(debug) == "table" and debug or {}
+local hookmetamethod_fn      = (GLOBAL_ENV and GLOBAL_ENV.hookmetamethod) or hookmetamethod or rawget(debug_tbl, "hookmetamethod")
+local getnamecallmethod_fn   = (GLOBAL_ENV and GLOBAL_ENV.getnamecallmethod) or getnamecallmethod or function() return "" end
+local checkcaller_fn         = (GLOBAL_ENV and GLOBAL_ENV.checkcaller) or checkcaller or function() return false end
+local fireproximityprompt_fn = (GLOBAL_ENV and GLOBAL_ENV.fireproximityprompt) or fireproximityprompt or function(prompt)
+    if prompt and prompt:IsA("ProximityPrompt") then
+        pcall(function()
+            prompt:InputHoldBegin()
+            task.wait(prompt.HoldDuration or 0)
+            prompt:InputHoldEnd()
+        end)
+    end
+end
+
+local get_ui_parent = function()
+    local ok, parent = pcall(function()
+        return (gethui and gethui()) or CoreGui
+    end)
+    if ok and parent then
+        return parent
+    end
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+-- ============================================================================
+-- 2. GAME MODULES & REMOTES (WITH DEEP MODULE DISCOVERY FALLBACK)
+-- ============================================================================
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 15)
+
+local function GetRemote(name)
+    if not Remotes then return nil end
+    return Remotes:FindFirstChild(name) or Remotes:WaitForChild(name, 3)
+end
+
+local EnemyKillRemote     = GetRemote("EnemyKill")
+local EnemyRewardRemote   = GetRemote("EnemyReward")
+local EnemyHurtMeRemote   = GetRemote("EnemyHurtMe")
+local EnemyClaimRemote    = GetRemote("EnemyClaim")
+local TeleportHomeRemote  = GetRemote("TeleportHome")
+local OpenPackRemote      = GetRemote("OpenPack")
+local RebirthRemote       = GetRemote("Rebirth")
+local BuyUpgradeRemote    = GetRemote("BuyUpgrade")
+local BuyCosmeticRemote   = GetRemote("BuyCosmetic")
+local EquipCosmeticRemote = GetRemote("EquipCosmetic")
+local EquipBestRemote     = GetRemote("EquipBest")
+local BenchUpgradeRemote  = GetRemote("BenchUpgrade")
+local BenchStopRemote     = GetRemote("BenchStop")
+
+local function SafeRequire(pathTbl)
+    local curr = ReplicatedStorage
+    for _, seg in ipairs(pathTbl) do
+        if not curr then
+            curr = nil
+            break
+        end
+        curr = curr:FindFirstChild(seg)
+    end
+    if curr and curr:IsA("ModuleScript") then
+        local ok, mod = pcall(require, curr)
+        if ok then return mod end
+    end
+    local targetName = pathTbl[#pathTbl]
+    if targetName then
+        for _, desc in ipairs(ReplicatedStorage:GetDescendants()) do
+            if desc:IsA("ModuleScript") and desc.Name == targetName then
+                local ok, mod = pcall(require, desc)
+                if ok then return mod end
+            end
+        end
+    end
+    return nil
+end
+
+local PlayerState        = SafeRequire({ "Client", "Core", "PlayerState" })
+local LocalEnemyRegistry = SafeRequire({ "Client", "Core", "LocalEnemyRegistry" })
+local SettingsController = SafeRequire({ "Client", "Controllers", "SettingsController" })
+local Progression        = SafeRequire({ "Shared", "Rules", "Progression" })
+local PowerConfig        = SafeRequire({ "Shared", "Rules", "PowerConfig" })
+local CosmeticConfig     = SafeRequire({ "Shared", "Rules", "CosmeticConfig" })
+local PlaceConfig        = SafeRequire({ "Shared", "Rules", "PlaceConfig" })
+local BaseConfig         = SafeRequire({ "Shared", "Rules", "BaseConfig" })
+
+local function CallRemote(remote, ...)
+    if not remote then return nil end
+    local args = { ... }
+    if remote:IsA("RemoteFunction") then
+        local ok, res = pcall(function()
+            return remote:InvokeServer(unpack(args))
+        end)
+        return ok and res or nil
+    elseif remote:IsA("RemoteEvent") then
+        pcall(function()
+            remote:FireServer(unpack(args))
+        end)
+        return true
+    end
+    return nil
+end
+
+-- ============================================================================
+-- 3. WORLD 1 & WORLD 2 DATABASES (ZONES, BOSSES, PACKS, UPGRADES, COSMETICS)
+-- ============================================================================
+local WORLD_1_ZONES = {
+    "Ruin", "Forest", "Desert", "Frozen Peaks", "Volcano",
+    "Toxic Wasteland", "Thunder Peaks", "Shadow Realm", "Cosmos", "Empyrean Palace"
+}
+
+local WORLD_2_ZONES = {
+    "Crimson Palace", "Cursed Wood", "Candlelit Keep", "Fools's Fair", "Amber Canyon",
+    "Emerald Grotto", "Copper Ruins", "Amethyst Fields", "Crimson Gardens", "Violet Tundra", "Sapphire Lagoon"
+}
+
+local ALL_ZONES_COMBINED = {}
+for _, z in ipairs(WORLD_1_ZONES) do table.insert(ALL_ZONES_COMBINED, z) end
+for _, z in ipairs(WORLD_2_ZONES) do table.insert(ALL_ZONES_COMBINED, z) end
+
+local ZONE_POSITIONS = {
+    -- World 1
+    ["Ruin"]            = Vector3.new(-1, 3, -265),
+    ["Forest"]          = Vector3.new(-1, 3, -765),
+    ["Desert"]          = Vector3.new(-1, 3, -1305),
+    ["Frozen Peaks"]    = Vector3.new(-1, 3, -1905),
+    ["Volcano"]         = Vector3.new(-1, 3, -2505),
+    ["Toxic Wasteland"] = Vector3.new(-1, 3, -3155),
+    ["Thunder Peaks"]   = Vector3.new(-1, 3, -3845),
+    ["Shadow Realm"]    = Vector3.new(-1, 3, -4575),
+    ["Cosmos"]          = Vector3.new(-1, 3, -5315),
+    ["Empyrean Palace"] = Vector3.new(-1, 3, -6005),
+    -- World 2
+    ["Crimson Palace"]  = Vector3.new(-1, 3, 3),
+    ["Cursed Wood"]     = Vector3.new(-1, 3, 475),
+    ["Candlelit Keep"]  = Vector3.new(-1, 3, 1305),
+    ["Fools's Fair"]    = Vector3.new(-1, 3, -2045),
+    ["Amber Canyon"]    = Vector3.new(-1, 3, -2675),
+    ["Emerald Grotto"]  = Vector3.new(-1, 3, -3315),
+    ["Copper Ruins"]    = Vector3.new(-1, 3, -3925),
+    ["Amethyst Fields"] = Vector3.new(-1, 3, -4575),
+    ["Crimson Gardens"] = Vector3.new(-1, 3, -5275),
+    ["Violet Tundra"]   = Vector3.new(-1, 3, -6105),
+    ["Sapphire Lagoon"] = Vector3.new(-1, 3, -6735),
+}
+
+local ENEMY_DATABASE = {
+    -- World 1
+    Noob                           = { loc = "Ruin",            isBoss = false },
+    NoobKing                       = { loc = "Ruin",            isBoss = true  },
+    BaconHair                      = { loc = "Forest",          isBoss = false },
+    Outlaw                         = { loc = "Forest",          isBoss = true  },
+    DesertRaider                   = { loc = "Desert",          isBoss = false },
+    SandSultan                     = { loc = "Desert",          isBoss = true  },
+    FrostNinja                     = { loc = "Frozen Peaks",    isBoss = false },
+    DominusFrigidus                = { loc = "Frozen Peaks",    isBoss = true  },
+    MagmaImp                       = { loc = "Volcano",         isBoss = false },
+    DominusInfernus                = { loc = "Volcano",         isBoss = true  },
+    ToxicScavenger                 = { loc = "Toxic Wasteland", isBoss = false },
+    DominusVespertilio             = { loc = "Toxic Wasteland", isBoss = true  },
+    Valkyrie                       = { loc = "Thunder Peaks",   isBoss = false },
+    DominusAureus                  = { loc = "Thunder Peaks",   isBoss = true  },
+    ShadowNinja                    = { loc = "Shadow Realm",    isBoss = false },
+    DominusFormidulosus            = { loc = "Shadow Realm",    isBoss = true  },
+    StarTrooper                    = { loc = "Cosmos",          isBoss = false },
+    DominusAstra                   = { loc = "Cosmos",          isBoss = true  },
+    EmpyreanKnight                 = { loc = "Empyrean Palace", isBoss = false },
+    DominusEmpyreus                = { loc = "Empyrean Palace", isBoss = true  },
+    -- World 2
+    OmegaKnight                    = { loc = "Crimson Palace",  isBoss = false },
+    OmegaMage                      = { loc = "Crimson Palace",  isBoss = false },
+    DarkApprentice                 = { loc = "Crimson Palace",  isBoss = false },
+    CrimsonSentinel                = { loc = "Crimson Palace",  isBoss = false },
+    RiftCantor                     = { loc = "Crimson Palace",  isBoss = false },
+    CrimsonVoidcaller              = { loc = "Crimson Palace",  isBoss = true  },
+    WanwoodAcolyte                 = { loc = "Cursed Wood",     isBoss = false },
+    CursedWarden                   = { loc = "Cursed Wood",     isBoss = false },
+    GrimGlow                       = { loc = "Cursed Wood",     isBoss = true  },
+    CandleVotary                   = { loc = "Candlelit Keep",  isBoss = false },
+    DungeonHeadsman                = { loc = "Candlelit Keep",  isBoss = false },
+    SolemnDarkOne                  = { loc = "Candlelit Keep",  isBoss = true  },
+    FederationJester               = { loc = "Fools's Fair",    isBoss = false },
+    FoolOfTheFederation            = { loc = "Fools's Fair",    isBoss = true  },
+    AmberSentry                    = { loc = "Amber Canyon",    isBoss = false },
+    ViscountOfTheFederation        = { loc = "Amber Canyon",    isBoss = true  },
+    EmeraldWarden                  = { loc = "Emerald Grotto",  isBoss = false },
+    EarlOfTheFederation            = { loc = "Emerald Grotto",  isBoss = true  },
+    CopperRevenant                 = { loc = "Copper Ruins",    isBoss = false },
+    DisgracedBaronOfTheFederation  = { loc = "Copper Ruins",    isBoss = true  },
+    AmethystCourtier               = { loc = "Amethyst Fields", isBoss = false },
+    ArchdukeOfTheFederation        = { loc = "Amethyst Fields", isBoss = true  },
+    CrimsonRonin                   = { loc = "Crimson Gardens", isBoss = false },
+    DukeOfTheFederation            = { loc = "Crimson Gardens", isBoss = true  },
+    FrostlitHerald                 = { loc = "Violet Tundra",   isBoss = false },
+    LadyOfTheFederation            = { loc = "Violet Tundra",   isBoss = true  },
+    TideKnight                     = { loc = "Sapphire Lagoon", isBoss = false },
+    LordOfTheFederation            = { loc = "Sapphire Lagoon", isBoss = true  },
+}
+
+local ALL_PACK_NAMES = {
+    "Rookie", "Hero", "Elite", "Champion", "Legend", "Eternity", "Omega",
+    "Dominus", "Godly", "Cosmic", "Ruin", "GrimGlow", "Hex", "Phantom",
+    "Rift", "Ascension", "Korblox", "Valkyrie", "Oblivion", "Cosmos",
+    "Null", "Supreme", "GoldRush", "Hacker", "Secret", "Sanctum", "Fighter"
+}
+
+local ALL_UPGRADE_IDS = {
+    "Cash", "Health", "Carry", "Crit", "Cooldown", "Streak", "Damage", "Speed"
+}
+
+local FALLBACK_AURA_LIST = {
+    "Basic", "Rookie", "Green", "Blue", "Purple", "Crimson", "Golden",
+    "Frost", "Flame", "Magma", "Toxic", "Thunder", "Lightning", "Shadow",
+    "Dark", "Void", "Cosmic", "Cosmos", "Starlight", "Celestial", "Empyrean",
+    "Dominus", "Omega", "Cursed", "Candlelit", "Amber", "Emerald",
+    "Copper", "Amethyst", "Violet", "Sapphire", "Godly", "Supreme", "Eternity"
+}
+
+local FALLBACK_TRAIL_LIST = {
+    "Basic", "Rookie", "Red", "Green", "Blue", "Yellow", "Orange", "Pink",
+    "White", "Purple", "Cyan", "Crimson", "Golden", "Gold", "Silver",
+    "Sand", "Desert", "Forest", "Nature", "Water", "Ocean", "Tide",
+    "Frost", "Ice", "Snow", "Glacier", "Winter",
+    "Flame", "Fire", "Inferno", "Lava", "Magma", "Solar",
+    "Toxic", "Acid", "Venom", "Poison", "Radioactive",
+    "Thunder", "Lightning", "Electric", "Storm", "Volt", "Plasma",
+    "Shadow", "Dark", "Darkness", "Nightmare", "Phantom", "Ghost", "Blood", "Void", "Abyss", "Oblivion",
+    "Star", "Starlight", "Nebula", "Galaxy", "Astral", "Cosmic", "Cosmos", "Celestial",
+    "Empyrean", "Radiant", "Divine", "Heavenly", "Angel", "Valkyrie", "Dominus", "Korblox",
+    "Omega", "Rift", "Cursed", "Wanwood", "GrimGlow", "Candlelit", "Jester", "Fool",
+    "Amber", "Emerald", "Copper", "Amethyst", "Violet", "Sapphire",
+    "Rainbow", "Glitch", "Hacker", "Cyber", "Matrix", "Mythic", "Godly", "Supreme", "Eternity"
+}
+
+local ACTIVE_CODES = {
+    "5KMEMBERS", "10KCCU", "50KLIKES", "30KLIKES", "20KLIKES",
+    "SOZFORUPDATES", "10KLIKES", "1KCCU", "POTIONS", "DISCORD"
+}
+
+-- ============================================================================
+-- 4. STATE & CONFIGURATION
+-- ============================================================================
+local State = {
+    Running             = true,
+    BrandIcon           = "rbxassetid://117030396934566",
+
+    -- Combat & Farming
+    AutoFarm            = false,
+    BuiltInAutoAttack   = false,
+    KillAura            = false,
+    KillBosses          = true,
+    AttackRate          = 20,
+    DamageMultEnabled   = false,
+    DamageMultValue     = 10000,
+    Godmode             = false,
+
+    -- Stage & Zone Patrol
+    AutoStageTravel     = false,
+    HoverHeight         = 6,
+    ZonePatrolEnabled   = false,
+    SelectedZones       = { "Ruin", "Forest", "Desert" },
+    CurrentPatrolIdx    = 1,
+    PatrolDwellTime     = 4,
+    SelectedW1Zone      = "Ruin",
+    SelectedW2Zone      = "Crimson Palace",
+
+    -- Packs & Base Automation
+    AutoBankPacks       = false,
+    IsBanking           = false,
+    AutoOpenPacks       = false,
+    AutoEquipBest       = false,
+    AutoPlaceBestBase   = false,
+    PlaceBestInterval   = 10,
+    AutoBenchUpgrade    = false,
+
+    -- Progression & Cosmetics
+    AutoRebirth         = false,
+    AutoBuyUpgrades     = false,
+    SelectedUpgrades    = { "Cash", "Damage", "Carry", "Crit", "Cooldown", "Streak", "Health", "Speed" },
+    AutoBestAura        = false,
+    AutoFastestTrail    = false,
+
+    -- Movement & Misc
+    WalkSpeedEnabled    = false,
+    WalkSpeedValue      = 75,
+    InfJump             = false,
+    Noclip              = false,
+    AntiAFK             = true,
+
+    -- Telemetry / Runtime
+    HitCounter          = 0,
+    TotalKills          = 0,
+    SessionCash         = 0,
+    SessionPower        = 0,
+    KillTimestamps      = {},
+    EarningsWindow      = {},
+    CachedPlot          = nil,
+    CachedBestPrompt    = nil,
+}
+
+local Connections = {}
+local noclipConn  = nil
+
+local function TrackConnection(conn)
+    if conn then
+        table.insert(Connections, conn)
+    end
+    return conn
+end
+
+-- ============================================================================
+-- 5. HELPER FUNCTIONS (DATA, CHARACTER, PADS, ENEMIES, BASE PLOT)
+-- ============================================================================
+local function FormatNumber(n)
+    n = tonumber(n) or 0
+    if n >= 1e15 then return string.format("%.2fQa", n / 1e15) end
+    if n >= 1e12 then return string.format("%.2fT",  n / 1e12) end
+    if n >= 1e9  then return string.format("%.2fB",  n / 1e9)  end
+    if n >= 1e6  then return string.format("%.2fM",  n / 1e6)  end
+    if n >= 1e3  then return string.format("%.1fK",  n / 1e3)  end
+    return tostring(math.floor(n))
+end
+
+local function GetPlayerData()
+    if PlayerState then
+        if type(PlayerState.Data) == "table" then
+            return PlayerState.Data
+        elseif type(PlayerState.GetData) == "function" then
+            local ok, res = pcall(function() return PlayerState:GetData() end)
+            if ok and type(res) == "table" then return res end
+        elseif type(PlayerState.Get) == "function" then
+            local ok, res = pcall(function() return PlayerState:Get() end)
+            if ok and type(res) == "table" then return res end
+        else
+            for _, v in pairs(PlayerState) do
+                if type(v) == "table" and (v.Cash ~= nil or v.Power ~= nil or v.Upgrades ~= nil or v.Rebirths ~= nil) then
+                    return v
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function GetPlayerCash()
+    local d = GetPlayerData()
+    if d and tonumber(d.Cash) then
+        return tonumber(d.Cash)
+    end
+    local attrCash = LocalPlayer:GetAttribute("Cash") or LocalPlayer:GetAttribute("Coins") or LocalPlayer:GetAttribute("Money")
+    if tonumber(attrCash) then
+        return tonumber(attrCash)
+    end
+    local ls = LocalPlayer:FindFirstChild("leaderstats")
+    if ls then
+        local cObj = ls:FindFirstChild("Cash") or ls:FindFirstChild("Coins") or ls:FindFirstChild("Money")
+        if cObj and tonumber(cObj.Value) then
+            return tonumber(cObj.Value)
+        end
+    end
+    return nil
+end
+
+local function GetCurrentWorld()
+    if PlaceConfig and type(PlaceConfig.World) == "number" then
+        return PlaceConfig.World
+    end
+    local d = GetPlayerData()
+    if d then
+        if type(d.World) == "number" then return d.World end
+        if type(d.World) == "function" then
+            local ok, w = pcall(d.World, d)
+            if ok and type(w) == "number" then return w end
+        end
+    end
+    local enemies = workspace:FindFirstChild("Enemies")
+    if enemies then
+        for _, e in ipairs(enemies:GetChildren()) do
+            local info = ENEMY_DATABASE[e.Name]
+            if info and table.find(WORLD_2_ZONES, info.loc) then
+                return 2
+            end
+        end
+    end
+    return 1
+end
+
+local function GetCharacterParts()
+    local char = LocalPlayer.Character
+    if not char then return nil, nil, nil end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum or hum.Health <= 0 then
+        return nil, nil, nil
+    end
+    return char, hrp, hum
+end
+
+local function SafeTeleport(targetPosOrCF)
+    local _, hrp = GetCharacterParts()
+    if not hrp then return false end
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+    if typeof(targetPosOrCF) == "CFrame" then
+        hrp.CFrame = targetPosOrCF
+    elseif typeof(targetPosOrCF) == "Vector3" then
+        hrp.CFrame = CFrame.new(targetPosOrCF)
+    end
+    return true
+end
+
+local function GetCarriedPackCount()
+    local raw = LocalPlayer:GetAttribute("CarriedPacks")
+    if type(raw) ~= "string" or raw == "" then
+        return 0
+    end
+    local count = 0
+    for _ in string.gmatch(raw, "[^;]+") do
+        count = count + 1
+    end
+    return count
+end
+
+local function GetCarryCapacity()
+    return tonumber(LocalPlayer:GetAttribute("CarryCapacity")) or 5
+end
+
+local function GetEnemyPadsFolder()
+    local map = workspace:FindFirstChild("Map")
+    if map then
+        if map:FindFirstChild("EnemyPads") then return map.EnemyPads end
+        if map:FindFirstChild("Areas") then return map.Areas end
+    end
+    return workspace:FindFirstChild("EnemyPads", true)
+end
+
+local function GetSortedPads()
+    local pads = {}
+    local seenIds = {}
+
+    local folder = GetEnemyPadsFolder()
+    if folder then
+        for idx, pad in ipairs(folder:GetChildren()) do
+            local id = tonumber(pad.Name) or tonumber(pad:GetAttribute("PadId")) or idx
+            local cf = pad:GetAttribute("PadCFrame")
+            if typeof(cf) ~= "CFrame" then
+                if pad:IsA("BasePart") then
+                    cf = pad.CFrame
+                elseif pad:IsA("Model") then
+                    local ok, pivot = pcall(function() return pad:GetPivot() end)
+                    if ok and typeof(pivot) == "CFrame" then
+                        cf = pivot
+                    end
+                else
+                    local part = pad:FindFirstChildWhichIsA("BasePart", true)
+                    if part then cf = part.CFrame end
+                end
+            end
+            if typeof(cf) == "CFrame" then
+                seenIds[id] = true
+                table.insert(pads, { id = id, cframe = cf, instance = pad })
+            end
+        end
+    end
+
+    local enemiesFolder = workspace:FindFirstChild("Enemies")
+    if enemiesFolder then
+        for idx, enemy in ipairs(enemiesFolder:GetChildren()) do
+            local padId = tonumber(enemy:GetAttribute("PadId")) or (1000 + idx)
+            if not seenIds[padId] then
+                local root = enemy:FindFirstChild("HumanoidRootPart")
+                    or enemy.PrimaryPart
+                    or enemy:FindFirstChildWhichIsA("BasePart", true)
+                if root then
+                    seenIds[padId] = true
+                    table.insert(pads, { id = padId, cframe = root.CFrame, instance = enemy })
+                end
+            end
+        end
+    end
+
+    if #pads == 0 then
+        local world = GetCurrentWorld()
+        local zoneList = (world == 2) and WORLD_2_ZONES or WORLD_1_ZONES
+        for idx, zName in ipairs(zoneList) do
+            local pos = ZONE_POSITIONS[zName]
+            if pos then
+                table.insert(pads, { id = idx, cframe = CFrame.new(pos), instance = nil })
+            end
+        end
+    end
+
+    table.sort(pads, function(a, b) return (a.id or 9999) < (b.id or 9999) end)
+    return pads
+end
+
+local function GetActiveEnemies(filterZones)
+    local folder = workspace:FindFirstChild("Enemies")
+    if not folder then return {} end
+
+    local zoneLookup = nil
+    if filterZones and #filterZones > 0 then
+        zoneLookup = {}
+        for _, z in ipairs(filterZones) do
+            zoneLookup[z] = true
+        end
+    end
+
+    local results = {}
+    for _, enemy in ipairs(folder:GetChildren()) do
+        local padId = enemy:GetAttribute("PadId")
+        local isBossAttr = enemy:GetAttribute("Boss")
+        local dbInfo = ENEMY_DATABASE[enemy.Name]
+        local isBoss = (isBossAttr == true) or (dbInfo and dbInfo.isBoss == true)
+
+        if (not isBoss) or State.KillBosses then
+            local zoneMatch = true
+            if zoneLookup and dbInfo and dbInfo.loc then
+                zoneMatch = (zoneLookup[dbInfo.loc] == true)
+            end
+            if zoneMatch then
+                local root = enemy:FindFirstChild("HumanoidRootPart")
+                    or enemy.PrimaryPart
+                    or enemy:FindFirstChildWhichIsA("BasePart", true)
+                local hum = enemy:FindFirstChildOfClass("Humanoid")
+                local alive = (not hum) or (hum.Health > 0)
+                if alive then
+                    table.insert(results, {
+                        model  = enemy,
+                        padId  = padId,
+                        isBoss = isBoss,
+                        root   = root,
+                        loc    = dbInfo and dbInfo.loc or nil,
+                    })
+                end
+            end
+        end
+    end
+
+    table.sort(results, function(a, b)
+        return (tonumber(a.padId) or 9999) < (tonumber(b.padId) or 9999)
+    end)
+    return results
+end
+
+-- ============================================================================
+-- BASE PLOT & BESTPROMPT FINDER (workspace.Map.Bases.PlotX)
+-- Matches Attribute "Owner" == LocalPlayer.UserId -> BestButton.Press.BestPrompt
+-- ============================================================================
+local function GetLocalPlayerPlotAndPrompt()
+    if State.CachedBestPrompt and State.CachedBestPrompt.Parent then
+        return State.CachedPlot, State.CachedBestPrompt
+    end
+
+    local map = workspace:FindFirstChild("Map")
+    local bases = (map and map:FindFirstChild("Bases")) or workspace:FindFirstChild("Bases", true)
+    if not bases then return nil, nil end
+
+    local myPlot = nil
+    local myUserId = LocalPlayer.UserId
+
+    for _, plot in ipairs(bases:GetChildren()) do
+        local ownerAttr = plot:GetAttribute("Owner")
+        if ownerAttr ~= nil and (tonumber(ownerAttr) == myUserId or tostring(ownerAttr) == tostring(myUserId) or ownerAttr == LocalPlayer.Name) then
+            myPlot = plot
+            break
+        end
+    end
+
+    if not myPlot then
+        local baseSpawn = LocalPlayer:GetAttribute("BaseSpawn")
+        if typeof(baseSpawn) == "CFrame" then
+            local bestDist = math.huge
+            for _, plot in ipairs(bases:GetChildren()) do
+                local ok, piv = pcall(function() return plot:GetPivot() end)
+                if ok and piv then
+                    local d = (piv.Position - baseSpawn.Position).Magnitude
+                    if d < bestDist then
+                        bestDist = d
+                        myPlot = plot
+                    end
+                end
+            end
+        end
+    end
+
+    if not myPlot then return nil, nil end
+    State.CachedPlot = myPlot
+
+    local bestBtn = myPlot:FindFirstChild("BestButton") or myPlot:FindFirstChild("BestButton", true)
+    local pressPart = bestBtn and (bestBtn:FindFirstChild("Press") or bestBtn:FindFirstChild("Press", true))
+    local bestPrompt = (pressPart and pressPart:FindFirstChild("BestPrompt"))
+        or (bestBtn and bestBtn:FindFirstChild("BestPrompt", true))
+        or (bestBtn and bestBtn:FindFirstChildWhichIsA("ProximityPrompt", true))
+        or myPlot:FindFirstChild("BestPrompt", true)
+
+    State.CachedBestPrompt = bestPrompt
+    return myPlot, bestPrompt
+end
+
+-- ============================================================================
+-- 6. METAMETHOD HOOKS (GODMODE)
+-- ============================================================================
+if hookmetamethod_fn then
+    pcall(function()
+        local oldNamecall
+        oldNamecall = hookmetamethod_fn(game, "__namecall", function(self, ...)
+            if not checkcaller_fn() and State.Running and State.Godmode then
+                local method = getnamecallmethod_fn()
+                if method == "FireServer" and (self == EnemyHurtMeRemote or self == EnemyClaimRemote or tostring(self) == "EnemyHurtMe" or tostring(self) == "EnemyClaim") then
+                    return nil
+                end
+            end
+            return oldNamecall(self, ...)
+        end)
+
+        local oldNewIndex
+        oldNewIndex = hookmetamethod_fn(game, "__newindex", function(self, key, value)
+            if not checkcaller_fn() and State.Running then
+                if State.Godmode and key == "Health" and typeof(self) == "Instance" and self:IsA("Humanoid") then
+                    local char = LocalPlayer.Character
+                    if char and self.Parent == char and type(value) == "number" and value < self.MaxHealth then
+                        return oldNewIndex(self, key, self.MaxHealth)
+                    end
+                end
+            end
+            return oldNewIndex(self, key, value)
+        end)
+    end)
+end
+
+-- ============================================================================
+-- 7. TELEMETRY & REWARD TRACKING
+-- ============================================================================
+if EnemyRewardRemote and EnemyRewardRemote:IsA("RemoteEvent") then
+    TrackConnection(EnemyRewardRemote.OnClientEvent:Connect(function(padId, cashEarned, powerEarned)
+        local now = os.clock()
+        local c = tonumber(cashEarned) or 0
+        local p = tonumber(powerEarned) or 0
+        State.TotalKills   = State.TotalKills + 1
+        State.SessionCash  = State.SessionCash + c
+        State.SessionPower = State.SessionPower + p
+        table.insert(State.KillTimestamps, now)
+        table.insert(State.EarningsWindow, { t = now, cash = c, power = p })
+    end))
+end
+
+local function GetTelemetryRates()
+    local now = os.clock()
+    local kills10s = 0
+    for i = #State.KillTimestamps, 1, -1 do
+        if now - State.KillTimestamps[i] <= 10 then
+            kills10s = kills10s + 1
+        else
+            table.remove(State.KillTimestamps, i)
+        end
+    end
+
+    local cash10s, power10s = 0, 0
+    for i = #State.EarningsWindow, 1, -1 do
+        local entry = State.EarningsWindow[i]
+        if now - entry.t <= 10 then
+            cash10s  = cash10s + entry.cash
+            power10s = power10s + entry.power
+        else
+            table.remove(State.EarningsWindow, i)
+        end
+    end
+
+    return kills10s / 10, cash10s / 10, power10s / 10
+end
+
+-- ============================================================================
+-- 8. CORE AUTOMATION LOOPS
+-- ============================================================================
+local function ApplyDamageMultiplier(enabled, val)
+    pcall(function()
+        LocalPlayer:SetAttribute("DamageMultiplier", enabled and val or 1)
+    end)
+end
+
+local function SetBuiltInAutoAttack(enabled)
+    pcall(function()
+        if SettingsController and type(SettingsController.Set) == "function" then
+            SettingsController:Set("AutoAttack", enabled)
+        end
+    end)
+end
+
+-- [A] Fast Combat Loop (Remote EnemyKill + Client Registry Instant Kill Aura)
+task.spawn(function()
+    while State.Running do
+        local interval = math.clamp(1 / math.max(State.AttackRate, 1), 0.02, 1)
+        if not State.IsBanking then
+            if State.AutoFarm and EnemyKillRemote then
+                local filter = State.ZonePatrolEnabled and State.SelectedZones or nil
+                local enemies = GetActiveEnemies(filter)
+                if #enemies > 0 then
+                    for _, enemy in ipairs(enemies) do
+                        if not State.Running or not State.AutoFarm or State.IsBanking then break end
+                        if enemy.padId then
+                            State.HitCounter = State.HitCounter + 1
+                            pcall(function()
+                                EnemyKillRemote:FireServer(enemy.padId, State.HitCounter, false, Vector3.new(0, 1, 0))
+                            end)
+                        end
+                    end
+                else
+                    local pads = GetSortedPads()
+                    for _, pad in ipairs(pads) do
+                        if not State.Running or not State.AutoFarm or State.IsBanking then break end
+                        State.HitCounter = State.HitCounter + 1
+                        pcall(function()
+                            EnemyKillRemote:FireServer(pad.id, State.HitCounter, false, Vector3.new(0, 1, 0))
+                        end)
+                    end
+                end
+            end
+
+            if State.KillAura and LocalEnemyRegistry and type(LocalEnemyRegistry.Damage) == "function" then
+                pcall(function()
+                    local registryTable = LocalEnemyRegistry.activeEnemies
+                        or LocalEnemyRegistry.Enemies
+                        or LocalEnemyRegistry._enemies
+                        or LocalEnemyRegistry
+                    for _, entry in pairs(registryTable) do
+                        if type(entry) == "table" then
+                            local isBoss = entry.isBoss or entry.Boss or (entry.model and entry.model:GetAttribute("Boss"))
+                            if (not isBoss) or State.KillBosses then
+                                LocalEnemyRegistry:Damage(entry, math.huge, Vector3.zero, "Hit", true)
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+        task.wait(interval)
+    end
+end)
+
+-- [B] Stage Auto-Travel & Multi-Zone Patrol Loop
+task.spawn(function()
+    local padIndex = 1
+    local lastPatrolSwitch = os.clock()
+
+    while State.Running do
+        if not State.IsBanking then
+            if State.ZonePatrolEnabled and #State.SelectedZones > 0 then
+                local enemies = GetActiveEnemies(State.SelectedZones)
+                if #enemies > 0 and enemies[1].root then
+                    local targetPos = enemies[1].root.Position + Vector3.new(0, State.HoverHeight, 0)
+                    SafeTeleport(targetPos)
+                else
+                    if os.clock() - lastPatrolSwitch >= State.PatrolDwellTime then
+                        State.CurrentPatrolIdx = (State.CurrentPatrolIdx % #State.SelectedZones) + 1
+                        lastPatrolSwitch = os.clock()
+                    end
+                    local zoneName = State.SelectedZones[State.CurrentPatrolIdx] or State.SelectedZones[1]
+                    local zonePos = ZONE_POSITIONS[zoneName]
+                    if zonePos then
+                        SafeTeleport(zonePos + Vector3.new(0, State.HoverHeight, 0))
+                    end
+                end
+                task.wait(0.18)
+            elseif State.AutoStageTravel then
+                local activeEnemies = GetActiveEnemies(nil)
+                if #activeEnemies > 0 then
+                    if padIndex > #activeEnemies then padIndex = 1 end
+                    local targetEnemy = activeEnemies[padIndex]
+                    padIndex = padIndex + 1
+                    if targetEnemy and targetEnemy.root then
+                        SafeTeleport(targetEnemy.root.Position + Vector3.new(0, State.HoverHeight, 0))
+                    end
+                else
+                    local pads = GetSortedPads()
+                    if #pads > 0 then
+                        if padIndex > #pads then padIndex = 1 end
+                        local pad = pads[padIndex]
+                        padIndex = padIndex + 1
+                        if pad and pad.cframe then
+                            SafeTeleport(pad.cframe.Position + Vector3.new(0, State.HoverHeight, 0))
+                        end
+                    end
+                end
+                task.wait(0.22)
+            else
+                task.wait(0.3)
+            end
+        else
+            task.wait(0.25)
+        end
+    end
+end)
+
+-- [C] Auto-Bank Carried Packs Loop
+task.spawn(function()
+    while State.Running do
+        if State.AutoBankPacks and not State.IsBanking then
+            local carried  = GetCarriedPackCount()
+            local capacity = GetCarryCapacity()
+            if carried >= capacity and capacity > 0 then
+                State.IsBanking = true
+                local _, hrp = GetCharacterParts()
+                local savedCF = hrp and hrp.CFrame or nil
+
+                pcall(function()
+                    local baseSpawn = LocalPlayer:GetAttribute("BaseSpawn")
+                    if typeof(baseSpawn) == "CFrame" then
+                        SafeTeleport(baseSpawn.Position + Vector3.new(0, 4, 0))
+                    end
+                    if TeleportHomeRemote then
+                        TeleportHomeRemote:FireServer()
+                    end
+                end)
+
+                local t0 = os.clock()
+                while State.Running and os.clock() - t0 < 3.5 do
+                    if GetCarriedPackCount() == 0 then
+                        break
+                    end
+                    if TeleportHomeRemote then
+                        pcall(function() TeleportHomeRemote:FireServer() end)
+                    end
+                    task.wait(0.25)
+                end
+
+                if savedCF and not State.AutoStageTravel and not State.ZonePatrolEnabled then
+                    task.wait(0.15)
+                    SafeTeleport(savedCF)
+                end
+                State.IsBanking = false
+            end
+        end
+        task.wait(0.35)
+    end
+end)
+
+-- [D] Auto-Open Packs, Auto Equip Best, Auto Bench Upgrade, and 10s Remote BestPrompt
+task.spawn(function()
+    local lastBestPromptFire = 0
+
+    while State.Running do
+        if State.AutoOpenPacks and OpenPackRemote then
+            local d = GetPlayerData()
+            if d and type(d.Packs) == "table" then
+                for packName, count in pairs(d.Packs) do
+                    if type(count) == "number" and count > 0 then
+                        CallRemote(OpenPackRemote, packName, count)
+                    end
+                end
+            else
+                for _, packName in ipairs(ALL_PACK_NAMES) do
+                    if not State.AutoOpenPacks or not State.Running then break end
+                    CallRemote(OpenPackRemote, packName, 1)
+                end
+            end
+        end
+
+        if State.AutoEquipBest and EquipBestRemote then
+            CallRemote(EquipBestRemote)
+        end
+
+        -- Fires BestButton.Press.BestPrompt remotely from anywhere once every 10 seconds (NO teleporting)
+        if State.AutoPlaceBestBase then
+            local now = os.clock()
+            if now - lastBestPromptFire >= State.PlaceBestInterval then
+                lastBestPromptFire = now
+                pcall(function()
+                    local _, bestPrompt = GetLocalPlayerPlotAndPrompt()
+                    if bestPrompt then
+                        fireproximityprompt_fn(bestPrompt)
+                    end
+                end)
+            end
+        end
+
+        if State.AutoBenchUpgrade and BenchUpgradeRemote then
+            CallRemote(BenchUpgradeRemote)
+        end
+
+        task.wait(0.8)
+    end
+end)
+
+-- ============================================================================
+-- [E] FIXED COSMETIC AUTOMATION (AURA & TRAIL DEEP DISCOVERY + EQUIP)
+-- ============================================================================
+local function GetCosmeticItemsForKind(kindName, scoreFn)
+    local results = {}
+    local seen = {}
+    local lowerKind = string.lower(kindName)
+
+    local function AddCandidate(id, itTbl, fallbackIdx)
+        if type(id) ~= "string" or id == "" or seen[id] then return end
+        if id == "Items" or id == "Kinds" or id == "Owned" or id == "Equipped" then return end
+        local robuxOnly = false
+        local price = 0
+        local world = nil
+        local score = (fallbackIdx or (#results + 1)) * 1000
+
+        if type(itTbl) == "table" then
+            robuxOnly = (itTbl.RobuxOnly == true) or (itTbl.Robux ~= nil and tonumber(itTbl.Robux) > 0) or (itTbl.ProductId ~= nil)
+            price = tonumber(itTbl.Price or itTbl.Cost or itTbl.Cash or itTbl.Coins) or 0
+            world = tonumber(itTbl.World)
+            score = scoreFn(itTbl, fallbackIdx or (#results + 1))
+        end
+
+        if not robuxOnly then
+            seen[id] = true
+            table.insert(results, {
+                id    = id,
+                price = price,
+                world = world,
+                score = score,
+            })
+        end
+    end
+
+    -- 1. Search CosmeticConfig and ALL required rules modules in ReplicatedStorage
+    local modulesToScan = {}
+    if type(CosmeticConfig) == "table" then
+        table.insert(modulesToScan, CosmeticConfig)
+    end
+    for _, desc in ipairs(ReplicatedStorage:GetDescendants()) do
+        if desc:IsA("ModuleScript") then
+            local mn = string.lower(desc.Name)
+            if string.find(mn, "cosmetic") or string.find(mn, lowerKind) then
+                local ok, mod = pcall(require, desc)
+                if ok and type(mod) == "table" and mod ~= CosmeticConfig then
+                    table.insert(modulesToScan, mod)
+                end
+            end
+        end
+    end
+
+    local function ScanConfigTable(tbl)
+        if type(tbl) ~= "table" then return end
+        local kindsTbl = tbl.Kinds or tbl
+        for k, v in pairs(kindsTbl) do
+            if type(k) == "string" and string.find(string.lower(k), lowerKind) and type(v) == "table" then
+                local rawItems = v.Items or v.List or v
+                if type(rawItems) == "table" then
+                    for idxKey, it in pairs(rawItems) do
+                        if type(it) == "table" then
+                            local itemId = it.Id or it.ID or it.Name or (type(idxKey) == "string" and idxKey) or nil
+                            AddCandidate(itemId, it, tonumber(idxKey) or (#results + 1))
+                        elseif type(it) == "string" then
+                            AddCandidate(it, nil, tonumber(idxKey) or (#results + 1))
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    for _, mod in ipairs(modulesToScan) do
+        pcall(ScanConfigTable, mod)
+    end
+
+    -- 2. Scan ReplicatedStorage asset folders (Uses GetAttribute safely so Roblox Trail.Speed property doesn't error!)
+    for _, desc in ipairs(ReplicatedStorage:GetDescendants()) do
+        if desc:IsA("Folder") or desc:IsA("Configuration") then
+            local n = string.lower(desc.Name)
+            if n == lowerKind or n == (lowerKind .. "s") then
+                for idx, child in ipairs(desc:GetChildren()) do
+                    local priceAttr = tonumber(child:GetAttribute("Price") or child:GetAttribute("Cost")) or 0
+                    local statAttr  = tonumber(
+                        child:GetAttribute("Speed")
+                        or child:GetAttribute("WalkSpeed")
+                        or child:GetAttribute("Multiplier")
+                        or child:GetAttribute("Boost")
+                        or child:GetAttribute("Order")
+                    ) or idx
+                    AddCandidate(child.Name, {
+                        Id         = child.Name,
+                        Price      = priceAttr,
+                        World      = tonumber(child:GetAttribute("World")),
+                        Speed      = statAttr,
+                        Multiplier = statAttr,
+                        Order      = tonumber(child:GetAttribute("Order")) or idx,
+                    }, idx)
+                end
+            end
+        end
+    end
+
+    -- 3. Also append fallback progression names so even if items aren't in a local folder, every known Trail/Aura ID is covered
+    local fallback = (kindName == "Aura") and FALLBACK_AURA_LIST or FALLBACK_TRAIL_LIST
+    for idx, name in ipairs(fallback) do
+        if not seen[name] then
+            AddCandidate(name, {
+                Id         = name,
+                Price      = 0,
+                Speed      = idx,
+                Multiplier = idx,
+                Order      = idx,
+            }, idx)
+        end
+    end
+
+    table.sort(results, function(a, b) return a.score < b.score end)
+    return results
+end
+
+local function ProcessCosmeticKind(kindName, scoreFn)
+    if not BuyCosmeticRemote then BuyCosmeticRemote = GetRemote("BuyCosmetic") end
+    if not EquipCosmeticRemote then EquipCosmeticRemote = GetRemote("EquipCosmetic") end
+
+    local d = GetPlayerData()
+    local cash = GetPlayerCash()
+    local world = GetCurrentWorld()
+    local items = GetCosmeticItemsForKind(kindName, scoreFn)
+
+    -- Locate the player's owned table & currently equipped ID for this kind
+    local ownedTbl = nil
+    local equippedId = nil
+    if type(d) == "table" then
+        if CosmeticConfig and type(CosmeticConfig.Kinds) == "table" then
+            local kCfg = CosmeticConfig.Kinds[kindName] or CosmeticConfig.Kinds[kindName .. "s"]
+            if type(kCfg) == "table" then
+                if kCfg.Owned and type(d[kCfg.Owned]) == "table" then ownedTbl = d[kCfg.Owned] end
+                if kCfg.Equipped and d[kCfg.Equipped] ~= nil then equippedId = d[kCfg.Equipped] end
+            end
+        end
+        ownedTbl = ownedTbl
+            or d[kindName .. "s"]
+            or d["Owned" .. kindName .. "s"]
+            or d[kindName]
+            or (type(d.Cosmetics) == "table" and (d.Cosmetics[kindName] or d.Cosmetics[kindName .. "s"]))
+            or (type(d.OwnedCosmetics) == "table" and (d.OwnedCosmetics[kindName] or d.OwnedCosmetics[kindName .. "s"]))
+        if type(ownedTbl) ~= "table" then
+            ownedTbl = nil
+        end
+
+        equippedId = equippedId
+            or d["Equipped" .. kindName]
+            or d["Selected" .. kindName]
+            or (type(d[kindName]) == "string" and d[kindName])
+            or (type(d.EquippedCosmetics) == "table" and d.EquippedCosmetics[kindName])
+    end
+
+    equippedId = equippedId
+        or LocalPlayer:GetAttribute("Equipped" .. kindName)
+        or LocalPlayer:GetAttribute(kindName)
+
+    local function IsOwned(id)
+        if type(ownedTbl) ~= "table" then return false end
+        if ownedTbl[id] == true or (type(ownedTbl[id]) == "number" and ownedTbl[id] > 0) then return true end
+        for k, v in pairs(ownedTbl) do
+            if v == id or (k == id and v) then return true end
+        end
+        return false
+    end
+
+    local newlyBoughtBestId = nil
+
+    -- Step 1: Buy all affordable unowned items in ascending order using:
+    -- ReplicatedStorage.Remotes.BuyCosmetic:InvokeServer(kindName, itemId)
+    for _, entry in ipairs(items) do
+        if (kindName == "Aura" and not State.AutoBestAura) or (kindName == "Trail" and not State.AutoFastestTrail) then
+            return
+        end
+        local worldOk = (entry.world == nil) or (entry.world <= world)
+        local alreadyOwned = IsOwned(entry.id)
+        local canAfford = (cash == nil) or (entry.price <= 0) or (cash >= entry.price)
+
+        if worldOk and not alreadyOwned and canAfford and BuyCosmeticRemote then
+            local ok, res = pcall(function()
+                return BuyCosmeticRemote:InvokeServer(kindName, entry.id)
+            end)
+            if ok and (res == true or (type(res) == "table" and res.Success ~= false)) then
+                newlyBoughtBestId = entry.id
+                if type(ownedTbl) == "table" then
+                    ownedTbl[entry.id] = true
+                end
+            end
+            task.wait(0.04)
+            d = GetPlayerData() or d
+            cash = GetPlayerCash()
+        end
+    end
+
+    -- Step 2: Equip the highest-tier owned item
+    if EquipCosmeticRemote then
+        -- Refresh ownedTbl after purchases
+        if type(d) == "table" then
+            if CosmeticConfig and type(CosmeticConfig.Kinds) == "table" then
+                local kCfg = CosmeticConfig.Kinds[kindName] or CosmeticConfig.Kinds[kindName .. "s"]
+                if type(kCfg) == "table" and kCfg.Owned and type(d[kCfg.Owned]) == "table" then
+                    ownedTbl = d[kCfg.Owned]
+                end
+            end
+            ownedTbl = ownedTbl or (type(d[kindName .. "s"]) == "table" and d[kindName .. "s"]) or (type(d["Owned" .. kindName .. "s"]) == "table" and d["Owned" .. kindName .. "s"])
+        end
+
+        local targetEquipId = nil
+        if type(ownedTbl) == "table" and next(ownedTbl) ~= nil then
+            for i = #items, 1, -1 do
+                local entry = items[i]
+                if IsOwned(entry.id) then
+                    targetEquipId = entry.id
+                    break
+                end
+            end
+        end
+
+        if not targetEquipId and newlyBoughtBestId then
+            targetEquipId = newlyBoughtBestId
+        end
+
+        if targetEquipId then
+            if targetEquipId ~= equippedId then
+                pcall(function()
+                    if EquipCosmeticRemote:IsA("RemoteFunction") then
+                        EquipCosmeticRemote:InvokeServer(kindName, targetEquipId)
+                    else
+                        EquipCosmeticRemote:FireServer(kindName, targetEquipId)
+                    end
+                end)
+            end
+        else
+            -- Fallback if owned list isn't readable: equip in ascending order so the highest owned Trail/Aura remains active
+            for _, entry in ipairs(items) do
+                if (kindName == "Aura" and not State.AutoBestAura) or (kindName == "Trail" and not State.AutoFastestTrail) then
+                    return
+                end
+                local worldOk = (entry.world == nil) or (entry.world <= world)
+                local priceOk = (cash == nil) or (entry.price <= 0) or (entry.price <= (cash * 20 + 1e6))
+                if worldOk and priceOk then
+                    pcall(function()
+                        if EquipCosmeticRemote:IsA("RemoteFunction") then
+                            EquipCosmeticRemote:InvokeServer(kindName, entry.id)
+                        else
+                            EquipCosmeticRemote:FireServer(kindName, entry.id)
+                        end
+                    end)
+                    task.wait(0.03)
+                end
+            end
+        end
+    end
+end
+
+task.spawn(function()
+    while State.Running do
+        local d = GetPlayerData()
+        local world = GetCurrentWorld()
+        local cash = GetPlayerCash() or 0
+
+        if State.AutoRebirth and RebirthRemote then
+            local canRebirth = true
+            if d and Progression and type(Progression.Level) == "function" and type(Progression.RebirthLevelRequirement) == "function" then
+                local lvl = Progression.Level(d.Power or 0)
+                local req = Progression.RebirthLevelRequirement(d.Rebirths or 0)
+                canRebirth = (lvl >= req)
+            end
+            if canRebirth then
+                CallRemote(RebirthRemote)
+            end
+        end
+
+        if State.AutoBuyUpgrades and BuyUpgradeRemote then
+            if d and PowerConfig and type(PowerConfig.UpgradePrice) == "function" and type(PowerConfig.Upgrades) == "table" then
+                local selectedSet = {}
+                for _, id in ipairs(State.SelectedUpgrades) do
+                    selectedSet[id] = true
+                end
+
+                for _ = 1, 5 do
+                    if not State.AutoBuyUpgrades or not State.Running then break end
+                    cash = GetPlayerCash() or 0
+                    local upgradesTbl = d.Upgrades or {}
+                    local cheapestId, cheapestPrice = nil, math.huge
+
+                    for _, upg in ipairs(PowerConfig.Upgrades) do
+                        if selectedSet[upg.Id] then
+                            local curLvl = tonumber(upgradesTbl[upg.Id]) or 0
+                            if curLvl < (upg.MaxLevel or 9999) then
+                                local ok, price = pcall(PowerConfig.UpgradePrice, world, upg.Id, curLvl)
+                                if ok and type(price) == "number" and price <= cash and price < cheapestPrice then
+                                    cheapestId = upg.Id
+                                    cheapestPrice = price
+                                end
+                            end
+                        end
+                    end
+
+                    if cheapestId then
+                        CallRemote(BuyUpgradeRemote, cheapestId)
+                        task.wait(0.1)
+                        d = GetPlayerData() or d
+                    else
+                        break
+                    end
+                end
+            else
+                for _, id in ipairs(State.SelectedUpgrades) do
+                    if not State.AutoBuyUpgrades or not State.Running then break end
+                    CallRemote(BuyUpgradeRemote, id)
+                end
+            end
+        end
+
+        if State.AutoBestAura then
+            pcall(ProcessCosmeticKind, "Aura", function(it, idx)
+                local mult = tonumber(it.Multiplier or it.PowerMultiplier or it.Boost or it.Bonus) or 0
+                local ord  = tonumber(it.Order or it.Index or idx) or 0
+                local prc  = tonumber(it.Price or it.Cost) or 0
+                return (mult * 1e9) + (ord * 1e6) + prc
+            end)
+        end
+
+        if State.AutoFastestTrail then
+            pcall(ProcessCosmeticKind, "Trail", function(it, idx)
+                local spd = tonumber(it.Speed or it.WalkSpeed or it.SpeedBoost or it.SpeedMultiplier or it.Multiplier or it.Boost) or 0
+                local ord = tonumber(it.Order or it.Index or idx) or 0
+                local prc = tonumber(it.Price or it.Cost) or 0
+                return (spd * 1e9) + (ord * 1e6) + prc
+            end)
+        end
+
+        task.wait(1.0)
+    end
+end)
+
+-- [F] Frame Loops: Godmode Health Lock, WalkSpeed, Infinite Jump, Anti-AFK
+TrackConnection(RunService.Heartbeat:Connect(function()
+    if not State.Running then return end
+    local _, hrp, hum = GetCharacterParts()
+    if hum and State.Godmode and hum.Health < hum.MaxHealth then
+        hum.Health = hum.MaxHealth
+    end
+    if hrp and hum and State.WalkSpeedEnabled then
+        local dir = hum.MoveDirection
+        if dir.Magnitude > 0 then
+            hrp.AssemblyLinearVelocity = Vector3.new(
+                dir.X * State.WalkSpeedValue,
+                hrp.AssemblyLinearVelocity.Y,
+                dir.Z * State.WalkSpeedValue
+            )
+        end
+    end
+    if State.DamageMultEnabled then
+        if LocalPlayer:GetAttribute("DamageMultiplier") ~= State.DamageMultValue then
+            ApplyDamageMultiplier(true, State.DamageMultValue)
+        end
+    end
+end))
+
+TrackConnection(UserInputService.JumpRequest:Connect(function()
+    if not State.Running or not State.InfJump then return end
+    local _, _, hum = GetCharacterParts()
+    if hum then
+        hum:ChangeState(Enum.HumanoidStateType.Jumping)
+    end
+end))
+
+TrackConnection(LocalPlayer.Idled:Connect(function()
+    if not State.Running or not State.AntiAFK then return end
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.zero)
+    end)
+end))
+
+local function RedeemAllCodes()
+    if not Remotes then return 0 end
+    local codeRemotes = {}
+    for _, r in ipairs(Remotes:GetChildren()) do
+        local lower = string.lower(r.Name)
+        if string.find(lower, "code") or string.find(lower, "redeem") then
+            table.insert(codeRemotes, r)
+        end
+    end
+    local count = 0
+    for _, code in ipairs(ACTIVE_CODES) do
+        for _, r in ipairs(codeRemotes) do
+            CallRemote(r, code)
+        end
+        count = count + 1
+        task.wait(0.1)
+    end
+    return count
+end
+
+-- ============================================================================
+-- 9. USER INTERFACE (MULTIHUB LIBRARY - COMPLETE GEMS PAGE WIPE)
+-- ============================================================================
+local Library = loadstring(
+    game:HttpGet("https://raw.githubusercontent.com/Allanursulino/sfas/refs/heads/main/MultiHub.lua")
+)()
+
+if not Library then
+    warn("[SAS MultiHub] Falha ao carregar MultiHub Library")
+    return
+end
+
+local function DestroyGemsPageInstances(win)
+    pcall(function()
+        if win and win.GemsTab then
+            local gt = win.GemsTab
+            win.GemsTab = nil
+            if win.Tabs and gt.Name then
+                win.Tabs[gt.Name] = nil
+            end
+            for _, v in pairs(gt) do
+                if typeof(v) == "Instance" then
+                    pcall(function() v:Destroy() end)
+                end
+            end
+        end
+
+        local roots = { get_ui_parent(), CoreGui, LocalPlayer:FindFirstChild("PlayerGui") }
+        for _, root in ipairs(roots) do
+            if root then
+                for _, desc in ipairs(root:GetDescendants()) do
+                    if desc:IsA("TextLabel") or desc:IsA("TextButton") then
+                        local t = desc.Text
+                        if t == "Break & Gems" or t == "Auto Collect Gems & Break" then
+                            local curr = desc.Parent
+                            while curr and curr.Parent do
+                                if curr:IsA("ScrollingFrame") or (curr.Parent:IsA("Frame") and string.find(string.lower(curr.Parent.Name), "page")) then
+                                    pcall(function() curr:Destroy() end)
+                                    break
+                                end
+                                curr = curr.Parent
+                            end
+                            if desc and desc.Parent then
+                                pcall(function() desc.Parent:Destroy() end)
+                            end
+                        elseif t == "Gems" then
+                            desc.Text = "Combat & Farm"
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+local _origCreateWindow = Library.CreateWindow
+Library.CreateWindow = function(self, opts)
+    local win = _origCreateWindow(self, opts)
+    if win then
+        win.AddGemsTab = function() end
+        DestroyGemsPageInstances(win)
+        win.ActiveTab = nil
+    end
+    return win
+end
+
+-- Create Main Window
+local Window = Library:CreateWindow({
+    Title         = "Steal a Superpower! | MultiHub",
+    SubTitle      = string.format("v1.0 - %s Mode - World %d", IS_MOBILE and "Mobile" or "PC", GetCurrentWorld()),
+    Icon          = "rbxassetid://117030396934566",
+    Discord       = "https://discord.gg/5USPd27zmu",
+    KeySystem     = false,
+    ToggleKeybind = Enum.KeyCode.RightControl,
+})
+
+-- ========================================================================
+-- CREATE TABS
+-- ========================================================================
+local Tab_Combat = Window:AddTab("Combat & Farm", "rbxassetid://117030396934566")
+local Tab_Zones  = Window:AddTab("Zones & Teleport", "flag")
+local Tab_Packs  = Window:AddTab("Packs & Base", "gift")
+local Tab_Prog   = Window:AddTab("Upgrades & Rebirth", "trending")
+local Tab_Player = Window:AddTab("Player & Stats", "user")
+
+-- ========================================================================
+-- TAB 1: COMBAT & AUTO FARM
+-- ========================================================================
+local GrpCombat_L = Tab_Combat:AddLeftGroupbox("Offensive Automation")
+local GrpCombat_R = Tab_Combat:AddRightGroupbox("Godmode & Damage Multiplier")
+
+GrpCombat_L:AddToggle("AutoFarm", {
+    Text     = "Auto Farm Enemies (Remote Kill)",
+    Default  = false,
+    Tooltip  = "Fires EnemyKill remotes across active enemies and pads automatically.",
+    Callback = function(v)
+        State.AutoFarm = v
+    end,
+})
+
+GrpCombat_L:AddToggle("KillAura", {
+    Text     = "Instant Kill Aura (INF Damage)",
+    Default  = false,
+    Tooltip  = "Hooks LocalEnemyRegistry:Damage with math.huge for instant pad clears.",
+    Callback = function(v)
+        State.KillAura = v
+    end,
+})
+
+GrpCombat_L:AddToggle("BuiltInAutoAttack", {
+    Text     = "Game Built-In Auto Attack",
+    Default  = false,
+    Tooltip  = "Enables SettingsController AutoAttack without needing gamepass.",
+    Callback = function(v)
+        State.BuiltInAutoAttack = v
+        SetBuiltInAutoAttack(v)
+    end,
+})
+
+GrpCombat_L:AddToggle("KillBosses", {
+    Text     = "Target Bosses",
+    Default  = true,
+    Tooltip  = "Include Zone Bosses (Dominus, Federation Lords, etc.) in Auto Farm & Kill Aura.",
+    Callback = function(v)
+        State.KillBosses = v
+    end,
+})
+
+GrpCombat_L:AddSlider("AttackRate", {
+    Text     = "Attack Speed (Hits / Sec)",
+    Min      = 5,
+    Max      = 60,
+    Default  = 20,
+    Rounding = 0,
+    Suffix   = " /s",
+    Callback = function(v)
+        State.AttackRate = tonumber(v) or 20
+    end,
+})
+
+GrpCombat_R:AddToggle("Godmode", {
+    Text     = "Godmode (Immortal)",
+    Default  = false,
+    Risk     = "green",
+    Tooltip  = "Blocks EnemyHurtMe & EnemyClaim packets and locks Humanoid Health at Max.",
+    Callback = function(v)
+        State.Godmode = v
+    end,
+})
+
+GrpCombat_R:AddToggle("DamageMultEnabled", {
+    Text     = "Custom Damage Multiplier",
+    Default  = false,
+    Risk     = "amber",
+    Tooltip  = "Overrides LocalPlayer DamageMultiplier attribute.",
+    Callback = function(v)
+        State.DamageMultEnabled = v
+        ApplyDamageMultiplier(v, State.DamageMultValue)
+    end,
+})
+
+GrpCombat_R:AddSlider("DamageMultValue", {
+    Text     = "Damage Multiplier Value",
+    Min      = 10,
+    Max      = 1000000,
+    Default  = 10000,
+    Rounding = 0,
+    Suffix   = "x",
+    Callback = function(v)
+        State.DamageMultValue = tonumber(v) or 10000
+        if State.DamageMultEnabled then
+            ApplyDamageMultiplier(true, State.DamageMultValue)
+        end
+    end,
+})
+
+-- ========================================================================
+-- TAB 2: ZONES, PATROL & TELEPORTS (WORLD 1 & WORLD 2)
+-- ========================================================================
+local GrpZone_L = Tab_Zones:AddLeftGroupbox("Stage Travel & Multi-Zone Patrol")
+local GrpZone_R = Tab_Zones:AddRightGroupbox("Instant Teleports")
+
+GrpZone_L:AddToggle("AutoStageTravel", {
+    Text     = "Auto Stage Travel (All Enemy Pads)",
+    Default  = false,
+    Tooltip  = "Teleports from Enemy/Pad to Enemy/Pad across the map automatically.",
+    Callback = function(v)
+        State.AutoStageTravel = v
+    end,
+})
+
+GrpZone_L:AddToggle("ZonePatrolEnabled", {
+    Text     = "Enable Multi-Zone Patrol",
+    Default  = false,
+    Tooltip  = "Farms and patrols only the specific zones selected below.",
+    Callback = function(v)
+        State.ZonePatrolEnabled = v
+    end,
+})
+
+GrpZone_L:AddDropdown("SelectPatrolZones", {
+    Text     = "Select Patrol Zones (World 1 & 2)",
+    Values   = ALL_ZONES_COMBINED,
+    Default  = { ["Ruin"] = true, ["Forest"] = true, ["Desert"] = true },
+    Multi    = true,
+    Noun     = "zone",
+    NoneText = "None",
+    Callback = function(selected)
+        if type(selected) == "table" then
+            local list = {}
+            for k, v in pairs(selected) do
+                if type(k) == "number" and type(v) == "string" then
+                    table.insert(list, v)
+                elseif type(k) == "string" and v == true then
+                    table.insert(list, k)
+                end
+            end
+            if #list > 0 then
+                State.SelectedZones = list
+                State.CurrentPatrolIdx = 1
+            end
+        end
+    end,
+})
+
+GrpZone_L:AddSlider("HoverHeight", {
+    Text     = "Hover Height Above Enemy/Pad",
+    Min      = 2,
+    Max      = 25,
+    Default  = 6,
+    Rounding = 0,
+    Suffix   = " studs",
+    Callback = function(v)
+        State.HoverHeight = tonumber(v) or 6
+    end,
+})
+
+GrpZone_R:AddButton({
+    Text    = "Teleport to Home Base (Bank Packs)",
+    Tooltip = "Teleports to your BaseSpawn and fires TeleportHome.",
+    Func    = function()
+        local baseSpawn = LocalPlayer:GetAttribute("BaseSpawn")
+        if typeof(baseSpawn) == "CFrame" then
+            SafeTeleport(baseSpawn.Position + Vector3.new(0, 4, 0))
+        end
+        if TeleportHomeRemote then
+            pcall(function() TeleportHomeRemote:FireServer() end)
+        end
+    end,
+})
+
+GrpZone_R:AddDivider()
+
+GrpZone_R:AddDropdown("World1Teleport", {
+    Text     = "World 1 Instant Teleport",
+    Values   = WORLD_1_ZONES,
+    Default  = "Ruin",
+    Callback = function(zoneName)
+        State.SelectedW1Zone = zoneName
+        local pos = ZONE_POSITIONS[zoneName]
+        if pos then SafeTeleport(pos + Vector3.new(0, 4, 0)) end
+    end,
+})
+
+GrpZone_R:AddButton({
+    Text    = "Teleport to Selected World 1 Zone",
+    Tooltip = "Teleports to the currently selected World 1 zone.",
+    Func    = function()
+        local pos = ZONE_POSITIONS[State.SelectedW1Zone]
+        if pos then SafeTeleport(pos + Vector3.new(0, 4, 0)) end
+    end,
+})
+
+GrpZone_R:AddDivider()
+
+GrpZone_R:AddDropdown("World2Teleport", {
+    Text     = "World 2 Instant Teleport",
+    Values   = WORLD_2_ZONES,
+    Default  = "Crimson Palace",
+    Callback = function(zoneName)
+        State.SelectedW2Zone = zoneName
+        local pos = ZONE_POSITIONS[zoneName]
+        if pos then SafeTeleport(pos + Vector3.new(0, 4, 0)) end
+    end,
+})
+
+GrpZone_R:AddButton({
+    Text    = "Teleport to Selected World 2 Zone",
+    Tooltip = "Teleports to the currently selected World 2 zone.",
+    Func    = function()
+        local pos = ZONE_POSITIONS[State.SelectedW2Zone]
+        if pos then SafeTeleport(pos + Vector3.new(0, 4, 0)) end
+    end,
+})
+
+-- ========================================================================
+-- TAB 3: PACKS, CARDS & BASE AUTOMATION
+-- ========================================================================
+local GrpPack_L = Tab_Packs:AddLeftGroupbox("Superpower Packs & Cards")
+local GrpPack_R = Tab_Packs:AddRightGroupbox("Base Plot & Bench Automation")
+
+GrpPack_L:AddToggle("AutoBankPacks", {
+    Text     = "Auto-Bank Carried Packs When Full",
+    Default  = false,
+    Tooltip  = "Detects when CarriedPacks >= CarryCapacity, banks at base, and resumes farming.",
+    Callback = function(v)
+        State.AutoBankPacks = v
+    end,
+})
+
+GrpPack_L:AddToggle("AutoOpenPacks", {
+    Text     = "Auto-Open All Owned Packs",
+    Default  = false,
+    Tooltip  = "Continuously invokes OpenPack for all packs in your inventory.",
+    Callback = function(v)
+        State.AutoOpenPacks = v
+    end,
+})
+
+GrpPack_L:AddToggle("AutoEquipBest", {
+    Text     = "Auto Equip Best Superpower Cards",
+    Default  = false,
+    Tooltip  = "Fires EquipBest remote to keep your strongest cards active.",
+    Callback = function(v)
+        State.AutoEquipBest = v
+    end,
+})
+
+GrpPack_R:AddToggle("AutoPlaceBestBase", {
+    Text     = "Auto Place Best Cards on Base Plot (10s)",
+    Default  = false,
+    Tooltip  = "Fires BestButton.Press.BestPrompt remotely from anywhere every 10 seconds.",
+    Callback = function(v)
+        State.AutoPlaceBestBase = v
+        if v then
+            pcall(function()
+                local _, bestPrompt = GetLocalPlayerPlotAndPrompt()
+                if bestPrompt then
+                    fireproximityprompt_fn(bestPrompt)
+                end
+            end)
+        end
+    end,
+})
+
+GrpPack_R:AddToggle("AutoBenchUpgrade", {
+    Text     = "Auto Upgrade Base Card Bench",
+    Default  = false,
+    Tooltip  = "Automatically fires BenchUpgrade (and BenchStop when turned off).",
+    Callback = function(v)
+        State.AutoBenchUpgrade = v
+        if not v and BenchStopRemote then
+            CallRemote(BenchStopRemote)
+        end
+    end,
+})
+
+-- ========================================================================
+-- TAB 4: PROGRESSION, UPGRADES & COSMETICS
+-- ========================================================================
+local GrpProg_L = Tab_Prog:AddLeftGroupbox("Rebirth & Stat Upgrades")
+local GrpProg_R = Tab_Prog:AddRightGroupbox("Cosmetics & Codes")
+
+GrpProg_L:AddToggle("AutoRebirth", {
+    Text     = "Auto Rebirth",
+    Default  = false,
+    Tooltip  = "Automatically rebirths as soon as your Power Level meets the requirement.",
+    Callback = function(v)
+        State.AutoRebirth = v
+    end,
+})
+
+GrpProg_L:AddToggle("AutoBuyUpgrades", {
+    Text     = "Auto Buy Upgrades (Cheapest First)",
+    Default  = false,
+    Tooltip  = "Purchases selected upgrades in optimal cost order.",
+    Callback = function(v)
+        State.AutoBuyUpgrades = v
+    end,
+})
+
+local defaultUpgradesMap = {}
+for _, id in ipairs(ALL_UPGRADE_IDS) do
+    defaultUpgradesMap[id] = true
+end
+
+GrpProg_L:AddDropdown("SelectUpgrades", {
+    Text     = "Select Upgrades to Auto-Buy",
+    Values   = ALL_UPGRADE_IDS,
+    Default  = defaultUpgradesMap,
+    Multi    = true,
+    Noun     = "upgrade",
+    NoneText = "None",
+    Callback = function(selected)
+        if type(selected) == "table" then
+            local list = {}
+            for k, v in pairs(selected) do
+                if type(k) == "number" and type(v) == "string" then
+                    table.insert(list, v)
+                elseif type(k) == "string" and v == true then
+                    table.insert(list, k)
+                end
+            end
+            State.SelectedUpgrades = list
+        end
+    end,
+})
+
+GrpProg_R:AddToggle("AutoBestAura", {
+    Text     = "Auto Buy & Equip Best Aura",
+    Default  = false,
+    Tooltip  = "Invokes BuyCosmetic('Aura', id) and EquipCosmetic('Aura', id) automatically.",
+    Callback = function(v)
+        State.AutoBestAura = v
+    end,
+})
+
+GrpProg_R:AddToggle("AutoFastestTrail", {
+    Text     = "Auto Buy & Equip Fastest Trail",
+    Default  = false,
+    Tooltip  = "Invokes BuyCosmetic('Trail', id) and EquipCosmetic('Trail', id) automatically.",
+    Callback = function(v)
+        State.AutoFastestTrail = v
+    end,
+})
+
+GrpProg_R:AddDivider()
+
+GrpProg_R:AddButton({
+    Text    = "Redeem All Active Codes",
+    Tooltip = "Redeems 5KMEMBERS, 10KCCU, 50KLIKES, POTIONS, SOZFORUPDATES, etc.",
+    Func    = function()
+        local n = RedeemAllCodes()
+        if Library and type(Library.Notify) == "function" then
+            pcall(function()
+                Library:Notify(string.format("Attempted %d active codes!", n), 4, "success")
+            end)
+        end
+    end,
+})
+
+-- ========================================================================
+-- TAB 5: PLAYER, MOVEMENT & LIVE TELEMETRY
+-- ========================================================================
+local GrpPlayer_L = Tab_Player:AddLeftGroupbox("Movement & Character")
+local GrpPlayer_R = Tab_Player:AddRightGroupbox("Live Session Telemetry")
+
+GrpPlayer_L:AddToggle("WalkSpeedEnabled", {
+    Text     = "Custom WalkSpeed Boost",
+    Default  = false,
+    Tooltip  = "Uses velocity vector override so game Trails do not reset your speed.",
+    Callback = function(v)
+        State.WalkSpeedEnabled = v
+    end,
+})
+
+GrpPlayer_L:AddSlider("WalkSpeedValue", {
+    Text     = "WalkSpeed Value",
+    Min      = 16,
+    Max      = 300,
+    Default  = 75,
+    Rounding = 0,
+    Suffix   = " spd",
+    Callback = function(v)
+        State.WalkSpeedValue = tonumber(v) or 75
+    end,
+})
+
+GrpPlayer_L:AddToggle("InfJump", {
+    Text     = "Infinite Jump",
+    Default  = false,
+    Tooltip  = "Jump infinitely in mid-air (works on PC Spacebar & Mobile Jump Button).",
+    Callback = function(v)
+        State.InfJump = v
+    end,
+})
+
+GrpPlayer_L:AddToggle("NoClip", {
+    Text     = "NoClip",
+    Default  = false,
+    Risk     = "red",
+    Tooltip  = "Walk through walls, barriers, and zone gates.",
+    Callback = function(value)
+        State.Noclip = value
+        if value then
+            if not noclipConn then
+                noclipConn = RunService.Stepped:Connect(function()
+                    local char = LocalPlayer.Character
+                    if not char then return end
+                    for _, part in ipairs(char:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            part.CanCollide = false
+                        end
+                    end
+                end)
+            end
+        else
+            if noclipConn then
+                noclipConn:Disconnect()
+                noclipConn = nil
+            end
+        end
+    end,
+})
+
+GrpPlayer_L:AddToggle("AntiAFK", {
+    Text     = "Anti-AFK (Prevent 20m Idle Kick)",
+    Default  = true,
+    Tooltip  = "Prevents being kicked for idling.",
+    Callback = function(v)
+        State.AntiAFK = v
+    end,
+})
+
+local TelemetryLbl_World = GrpPlayer_R:AddLabel({ Text = "World: 1 | Carried Packs: 0 / 5" })
+local TelemetryLbl_Cash  = GrpPlayer_R:AddLabel({ Text = "Cash: $0 (+0/s)" })
+local TelemetryLbl_Power = GrpPlayer_R:AddLabel({ Text = "Power: 0 (+0/s)" })
+local TelemetryLbl_Level = GrpPlayer_R:AddLabel({ Text = "Level: 0 / 0 (Rebirths: 0)" })
+local TelemetryLbl_Kills = GrpPlayer_R:AddLabel({ Text = "Session Kills: 0 (0.0 kills/s)" })
+
+GrpPlayer_R:AddDivider()
+
+local BtnCharReset = GrpPlayer_R:AddButton({
+    Text = "Reset Character",
+    Func = function()
+        local _, _, hum = GetCharacterParts()
+        if hum then hum.Health = 0 end
+    end,
+})
+
+BtnCharReset:AddButton({
+    Text = "Rejoin",
+    Func = function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end,
+})
+
+task.spawn(function()
+    while State.Running and not Library.Unloaded do
+        pcall(function()
+            local d = GetPlayerData()
+            local kps, cps, pps = GetTelemetryRates()
+            local carried = GetCarriedPackCount()
+            local cap     = GetCarryCapacity()
+            local cash    = GetPlayerCash() or 0
+            local power   = d and d.Power or 0
+            local rebs    = d and d.Rebirths or 0
+            local lvl     = (Progression and Progression.Level and d) and Progression.Level(power) or 0
+            local reqLvl  = (Progression and Progression.RebirthLevelRequirement and d) and Progression.RebirthLevelRequirement(rebs) or 0
+
+            if TelemetryLbl_World and TelemetryLbl_World.SetText then
+                TelemetryLbl_World:SetText(string.format(
+                    "World: %d | Carried Packs: %d / %d%s",
+                    GetCurrentWorld(), carried, cap, State.IsBanking and " [BANKING]" or ""
+                ))
+            end
+            if TelemetryLbl_Cash and TelemetryLbl_Cash.SetText then
+                TelemetryLbl_Cash:SetText(string.format(
+                    "Cash: $%s (+%s/s)",
+                    FormatNumber(cash), FormatNumber(cps)
+                ))
+            end
+            if TelemetryLbl_Power and TelemetryLbl_Power.SetText then
+                TelemetryLbl_Power:SetText(string.format(
+                    "Power: %s (+%s/s)",
+                    FormatNumber(power), FormatNumber(pps)
+                ))
+            end
+            if TelemetryLbl_Level and TelemetryLbl_Level.SetText then
+                TelemetryLbl_Level:SetText(string.format(
+                    "Level: %d / %d (Rebirths: %d)",
+                    lvl, reqLvl, rebs
+                ))
+            end
+            if TelemetryLbl_Kills and TelemetryLbl_Kills.SetText then
+                TelemetryLbl_Kills:SetText(string.format(
+                    "Session Kills: %d (%.1f kills/s)",
+                    State.TotalKills, kps
+                ))
+            end
+        end)
+        task.wait(0.5)
+    end
+
+    if noclipConn then
+        noclipConn:Disconnect()
+        noclipConn = nil
+    end
+end)
+
+-- ============================================================================
+-- 10. INITIALIZATION & CLEANUP HANDLER
+-- ============================================================================
+DestroyGemsPageInstances(Window)
+pcall(function()
+    Window:SelectTab(Tab_Zones)
+    Window:SelectTab(Tab_Combat)
+end)
+
+task.defer(function()
+    DestroyGemsPageInstances(Window)
+    pcall(function()
+        Window:SelectTab(Tab_Combat)
+    end)
+end)
+
+task.delay(1, function()
+    DestroyGemsPageInstances(Window)
+    pcall(function()
+        Library:Notify("SAS MultiHub v1.0 loaded! Press RightControl to toggle UI", 4, "success")
+    end)
+end)
+
+GLOBAL_ENV.__SAS_MULTIHUB_CLEANUP = function()
+    State.Running = false
+    ApplyDamageMultiplier(false, 1)
+    if noclipConn then
+        pcall(function() noclipConn:Disconnect() end)
+        noclipConn = nil
+    end
+    for _, conn in ipairs(Connections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    table.clear(Connections)
+    if Library and type(Library.Unload) == "function" then
+        pcall(function() Library:Unload() end)
+    end
+end
