@@ -7908,11 +7908,6 @@ function Library:CreateWindow(opts)
 		})
 	end)
 
-	-- Inicializando a aba do MultiHub
-	pcall(function()
-		window:AddGemsTab()
-	end)
-
 	return window
 end
 
