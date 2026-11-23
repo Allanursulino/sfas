@@ -275,7 +275,7 @@ Fonts.Body    = Fonts.Inter
 Fonts.Builder = Fonts.Inter
 
 Fonts.InterMed = tryAssetFont(
-	"rbxasset://fonts/families/BuilderSans.json",
+	"asset://fonts/families/BuilderSans.json",
 	Enum.FontWeight.Medium,
 	Enum.FontStyle.Normal,
 	Enum.Font.GothamMedium
@@ -283,7 +283,7 @@ Fonts.InterMed = tryAssetFont(
 Fonts.BuilderMed = Fonts.InterMed
 
 Fonts.InterBold = tryAssetFont(
-	"rbxasset://fonts/families/BuilderSans.json",
+	"asset://fonts/families/BuilderSans.json",
 	Enum.FontWeight.Bold,
 	Enum.FontStyle.Normal,
 	Enum.Font.GothamBold
@@ -9282,7 +9282,7 @@ do
 	local img = Library:New("ImageLabel", {
 		Name = "Logo",
 		BackgroundTransparency = 1,
-		Image = "rbxassetid://117030396934566",
+		Image = "rbxassetid://101633112743062",
 		ScaleType = Enum.ScaleType.Fit,
 		Size = UDim2.new(1, 0, 1, 0),
 		ZIndex = z + 1,
