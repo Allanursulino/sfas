@@ -6971,7 +6971,7 @@ function Library:CreateWindow(opts)
 		farmBox:AddToggle("AutoCollectGemsBreak", {
 			Text = "Auto Collect Gems & Break",
 			Default = false,
-			Tooltip = "Collects dropped gems first (walking), then farms the selected zone with the hub's own egg farm",
+			Tooltip = "Farms the selected zone with the hub's own egg farm and picks up the dropped gems from where you stand (prompt and touch fired remotely, the character never moves, so Steal Animals is never interrupted). If your speed is too low for the zone, the hub trains first (Farm tab > Treadmill > Train up to the picked zone)",
 		})
 
 		local function tgl(name) return rawget(Library.Toggles, name) end
@@ -7028,12 +7028,16 @@ function Library:CreateWindow(opts)
 		end
 
 		-- Nearest dropped gem (any child of workspace.EggGemDrops; the name is not filtered any more).
+		-- A gem already walked to is not chased again for 20 s (stall fix 2026-11-26: the pieces are client visuals
+		-- that can stay on the floor, and chasing the same one kept the egg farm paused forever).
+		local gemVisited = setmetatable({}, { __mode = "k" })
 		local function nearestGem(rootPart)
 			local folder = workspace:FindFirstChild("EggGemDrops")
 			if not folder then return nil end
 			local best, bestPos, bestDist
+			local now = os.clock()
 			for _, item in ipairs(folder:GetChildren()) do
-				local pos = gemTarget(item)
+				local pos = (gemVisited[item] or 0) < now and gemTarget(item)
 				if pos then
 					local d = (rootPart.Position - pos).Magnitude
 					if not bestDist or d < bestDist then best, bestPos, bestDist = item, pos, d end
@@ -7063,6 +7067,7 @@ function Library:CreateWindow(opts)
 			local lastGemAt = 0
 
 			local function restore()
+				getgenv().MultiHubGemsWanted = false
 				if not saved then return end
 				local mode, pick, farm = opt("ZoneMode"), opt("ZonePick"), tgl("AutoFarm")
 				if mode and saved.mode ~= nil then mode:SetValue(saved.mode) end
@@ -7096,10 +7101,27 @@ function Library:CreateWindow(opts)
 							}
 						end
 
-						local gem, gemPos = nearestGem(root)
-						if gem then
+						-- NEW (2026-11-19): when the hub exposes MultiHubGemStep, the hub's main loop collects the gems
+						-- itself between farm steps (short teleport onto each gem + its prompt, "BREAK - NO KEY" system),
+						-- so the farm is never paused and nothing fights over the character. Here we only switch it on
+						-- and keep the farm on the chosen zone. The walking code below stays as the fallback for an
+						-- older hub script without MultiHubGemStep.
+						local carrying = Players.LocalPlayer:GetAttribute("Carrying") ~= nil
+						local gem, gemPos
+						if type(getgenv().MultiHubGemStep) == "function" then
+							getgenv().MultiHubGemsWanted = true
+						elseif not carrying then
+							-- never walk off to a gem while carrying an animal away from a guard
+							gem, gemPos = nearestGem(root)
+						end
+						if type(getgenv().MultiHubGemStep) == "function" then
+							applyZone(label)
+							if not farm.Value then farm:SetValue(true) end
+							pausedFarm = false
+						elseif gem then
 							-- PART 1: gems first. Pause the egg farm so it does not fight the walking.
 							lastGemAt = os.clock()
+							gemVisited[gem] = os.clock() + 20
 							if farm.Value then farm:SetValue(false); pausedFarm = true end
 							-- Go there with the hub's own travel (same as going to an egg); plain MoveTo only as a fallback.
 							local travel = getgenv().MultiHubTravelNear
